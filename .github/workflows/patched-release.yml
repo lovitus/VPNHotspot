@@ -1,0 +1,172 @@
+name: Patched stable release
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'patches/**'
+      - 'scripts/fork-release/**'
+      - 'scripts/verify_legacy_firewall_cleanup.py'
+      - '.github/workflows/**'
+      - 'FORK.md'
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: patched-stable-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: >-
+      github.repository != 'Mygod/VPNHotspot' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.prepare.outputs.skip }}
+      tag: ${{ steps.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: maintenance
+          persist-credentials: false
+      - name: Test release recovery and immutable assets
+        run: python3 -m unittest discover -s maintenance/scripts/fork-release -p 'test_*.py' -v
+      - name: Resolve stable upstream and apply patches
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 maintenance/scripts/fork-release/release.py prepare --output prepared
+      - name: Preserve the exact source commit
+        if: steps.prepare.outputs.skip != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: prepared-source
+          path: prepared/
+          if-no-files-found: error
+
+  verify:
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: maintenance
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: prepared-source
+          path: prepared
+      - name: Restore source and unmodified baseline
+        run: |
+          python3 maintenance/scripts/fork-release/release.py restore
+          upstream_sha=$(python3 -c 'import json; print(json.load(open("prepared/build-info.json"))["upstream_sha"])')
+          git -C source worktree add --detach ../baseline "$upstream_sha"
+          git -C source submodule update --init --recursive --depth=1
+      - name: Install firewall regression dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y iptables util-linux
+      - name: Reproduce the old firewall failure and verify the fix
+        run: >-
+          python3 maintenance/scripts/verify_legacy_firewall_cleanup.py
+          --source source --baseline-source baseline
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager "platforms;android-37.0" "build-tools;37.0.0" "ndk;29.0.14206865"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+      - name: Install Android Rust targets and build tools
+        run: |
+          rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+          cargo install cargo-ndk --locked
+          cargo install cargo-audit --locked
+      - name: Check and test Rust daemon
+        working-directory: source/mobile/src/main/rust/vpnhotspotd
+        run: |
+          cargo fmt -- --check
+          cargo check --locked --all-targets
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked --lib
+          cargo audit
+      - name: Verify legacy policy-rule recovery in an isolated namespace
+        run: |
+          cargo build --locked --manifest-path source/mobile/src/main/rust/vpnhotspotd/Cargo.toml --example clean_legacy_rules
+          sudo unshare --net -- bash maintenance/scripts/fork-release/test_legacy_routing_netns.sh source/mobile/src/main/rust/vpnhotspotd/target/debug/examples/clean_legacy_rules
+      - name: Build and check Android app
+        working-directory: source
+        run: |
+          ./gradlew assembleDebug check --no-daemon
+          ./gradlew :mobile:verifyReleaseCoroutineDebugR8 :mobile:assembleRelease --no-daemon
+          git diff --exit-code
+          git diff --cached --exit-code
+      - name: Preserve unsigned APKs for the signing job
+        uses: actions/upload-artifact@v7
+        with:
+          name: verified-unsigned-apks
+          path: source/mobile/build/outputs/apk/release/*-unsigned.apk
+          if-no-files-found: error
+      - name: Upload Android test and lint reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: verification-reports
+          path: source/mobile/build/reports/
+          if-no-files-found: ignore
+
+  publish:
+    needs: [prepare, verify]
+    if: >-
+      needs.prepare.outputs.skip != 'true' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: maintenance
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: prepared-source
+          path: prepared
+      - uses: actions/download-artifact@v8
+        with:
+          name: verified-unsigned-apks
+          path: unsigned
+      - name: Restore the verified source commit
+        run: python3 maintenance/scripts/fork-release/release.py restore
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v4
+      - name: Install signing tools
+        run: sdkmanager "build-tools;37.0.0"
+      - name: Sign and verify all four APKs
+        env:
+          APK_SIGNING_KEY: ${{ secrets.APK_SIGNING_KEY }}
+          APK_SIGNING_PASSWORD: ${{ secrets.APK_SIGNING_PASSWORD }}
+          APK_SIGNING_ALIAS: ${{ secrets.APK_SIGNING_ALIAS }}
+        run: python3 maintenance/scripts/fork-release/release.py sign
+      - name: Publish an immutable source tag and signed release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 maintenance/scripts/fork-release/release.py publish

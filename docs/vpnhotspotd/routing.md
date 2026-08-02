@@ -664,7 +664,19 @@ External mutations:
 - repeatedly delete IPv4 policy rules at `<primary-priority>`.
 - repeatedly delete IPv4 policy rules at `<fallback-priority>`.
 - repeatedly delete IPv4 policy rules at `<upstream-disable-priority>`.
+- recover pre-v3 IPv4 rule groups: dump IPv4 rules; identify an unmarked,
+  all-address `iif <downstream> priority 17980 unreachable` guard, then delete
+  exact snapshot rules for that interface with priorities 17800/17900 and
+  `lookup <table >= 1000>`, followed by the guard. Reject extra selectors;
+  preserve lookups without a matching guard and do not flush upstream tables.
+  Duplicates and detached interfaces are included. Ignore only missing-rule
+  errors; propagate other failures with structured context.
 - flush IPv6 routes from table 900.
+
+Legacy recovery is performed only by Clean/reapply, not normal startup or
+stop. Reapply rebuilds current rules; reboot clears temporary state. Repeated
+Clean is idempotent. Exact legacy rule groups created by another program are
+indistinguishable: do not run a second legacy routing owner concurrently.
 
 For every current interface name:
 
@@ -683,19 +695,31 @@ External mutations:
 
 - repeatedly delete `iptables -t mangle PREROUTING -j vpnhotspot_dns_tproxy`.
 - repeatedly delete `iptables -t filter INPUT -j vpnhotspot_dns_input`.
+- repeatedly delete the legacy `iptables -t filter FORWARD -j vpnhotspot_fwd` jump.
 - repeatedly delete `iptables -t filter FORWARD -j vpnhotspot_acl`.
 - repeatedly delete `iptables -t nat PREROUTING -j vpnhotspot_dns_nat`.
 - repeatedly delete `iptables -t nat POSTROUTING -j vpnhotspot_masquerade`.
 - restore IPv4 mangle table input that flushes or creates
   `vpnhotspot_dns_tproxy`, then deletes it.
 - restore IPv4 filter table input that flushes or creates
-  `vpnhotspot_dns_input`, `vpnhotspot_acl`, and `vpnhotspot_stats`, then
-  deletes them.
+  `vpnhotspot_dns_input`, `vpnhotspot_fwd`, `vpnhotspot_acl`, and
+  `vpnhotspot_stats`, then deletes them in that order.
 - restore IPv4 nat table input that flushes or creates `vpnhotspot_dns_nat`
   and `vpnhotspot_masquerade`, then deletes them.
 
 The IPv4 mangle `vpnhotspot_dns_tproxy` cleanup is legacy-shaped cleanup kept
 in Clean. IPv4 nat cleanup must stay scoped to app-owned jumps and chains.
+
+The legacy IPv4 filter `vpnhotspot_fwd` chain can survive an upgrade or process
+death with jumps to `vpnhotspot_acl`. Clean/reapply removes its incoming
+`FORWARD` jumps and flushes the legacy chain before deleting the ACL; otherwise
+`iptables-restore` cannot delete the still-referenced ACL. Normal session stop
+only rolls back the current session's mutations; legacy state is recovered by
+Clean/reapply or cleared by reboot. A missing legacy chain is created empty and
+deleted in the same restore transaction, so cleanup is repeatable after partial
+startup or an earlier Clean. Other chains and their rules are preserved;
+unexpected restore failures, including remaining external references, are
+still reported.
 
 ### IPv6 Firewall Cleanup
 
