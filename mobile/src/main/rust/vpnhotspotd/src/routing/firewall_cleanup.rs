@@ -32,6 +32,14 @@ pub(super) async fn clean() {
         &["-j", "vpnhotspot_dns_input"],
     )
     .await;
+    // v2 forwarded through this intermediate chain, which can still reference the ACL after an upgrade.
+    delete_iptables_repeated(
+        IptablesTarget::Ipv4,
+        "filter",
+        "FORWARD",
+        &["-j", "vpnhotspot_fwd"],
+    )
+    .await;
     delete_iptables_repeated(
         IptablesTarget::Ipv4,
         "filter",
@@ -61,9 +69,11 @@ pub(super) async fn clean() {
 COMMIT
 *filter
 :vpnhotspot_dns_input - [0:0]
+:vpnhotspot_fwd - [0:0]
 :vpnhotspot_acl - [0:0]
 :vpnhotspot_stats - [0:0]
 -X vpnhotspot_dns_input
+-X vpnhotspot_fwd
 -X vpnhotspot_acl
 -X vpnhotspot_stats
 COMMIT

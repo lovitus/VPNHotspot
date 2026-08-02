@@ -58,6 +58,25 @@ This app only indirectly write persistent changes through system APIs thus it sh
 
 Routing, firewall, addresses, and daemon/service state managed by this app are cleaned up when stopped, by Clean, or upon reboot.
 
+### `iptables-restore: line 10 failed` after an upgrade?
+
+Stop VPN sharing before updating. Rules left by v2 can keep the old forwarding
+chain attached to the access-control chain, making cleanup fail. This build's
+**Settings > Clean/reapply routing rules** also removes that legacy forwarding
+chain. Rebooting clears the temporary netfilter state as well.
+
+The line number alone does not establish the cause on every device. If the error
+persists, use **Settings > Export debug information** and include the app version,
+Android version, and the action that triggered it; the report includes the
+restore input needed to identify the failing rule.
+
+### Connected clients have no internet after upgrading from v2?
+
+Legacy IPv4 policy rules can point to obsolete upstream tables and reject
+forwarded traffic before v3’s current rules. Use **Settings > Clean/reapply
+routing rules** to remove recognizable legacy rule groups. Rebooting also clears
+them. This does not address every possible DNS, VPN or ROM issue.
+
 ### [No root?](https://github.com/Mygod/VPNHotspot/issues/62)
 
 ### Failed to create group due to internal error/repeater shuts down after a while?
