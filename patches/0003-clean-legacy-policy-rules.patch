@@ -307,7 +307,7 @@ index 4c9297217..bc8866524 100644
 +++ b/mobile/src/main/rust/vpnhotspotd/src/shared/mod.rs
 @@ -6,4 +6,5 @@
  pub mod ipsec;
-+pub mod legacy_routing;
  pub mod ipv4_forward_counter;
++pub mod legacy_routing;
  pub mod model;
  pub mod nat66_counter;
