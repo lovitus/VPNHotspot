@@ -1,0 +1,131 @@
+diff --git a/mobile/src/main/rust/vpnhotspotd/src/dns.rs b/mobile/src/main/rust/vpnhotspotd/src/dns.rs
+index 9f525a1..f91ef2f 100644
+--- a/mobile/src/main/rust/vpnhotspotd/src/dns.rs
++++ b/mobile/src/main/rust/vpnhotspotd/src/dns.rs
+@@ -3,6 +3,7 @@ use std::io;
+ use std::net::{Ipv4Addr, TcpListener, UdpSocket};
+ use std::os::fd::{AsRawFd, RawFd};
+ use std::sync::Arc;
++use std::time::Duration;
+ 
+ use libc::c_int;
+ use socket2::SockRef;
+@@ -11,8 +12,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, Interest, Ready};
+ use tokio::net::{
+     TcpListener as TokioTcpListener, TcpStream as TokioTcpStream, UdpSocket as TokioUdpSocket,
+ };
+-use tokio::sync::Mutex;
+-use tokio::{select, spawn};
++use tokio::sync::{Mutex, Semaphore};
++use tokio::{select, spawn, time::timeout};
+ use tokio_util::sync::CancellationToken;
+ 
+ use crate::report;
+@@ -30,6 +31,8 @@ pub(crate) const DNS_PORT: u16 = 53;
+ const ANDROID_RESOLV_NO_RETRY: u32 = 1 << 0;
+ // Maximum DNS message size carried over TCP or EDNS0 UDP.
+ const DNS_MAX_PACKET: usize = 65_535;
++const DNS_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
++const DNS_MAX_IN_FLIGHT: usize = 32;
+ 
+ pub(crate) struct Runtime {
+     call_id: u64,
+@@ -203,6 +206,7 @@ impl Runtime {
+                 stop.clone(),
+                 self.counters.clone(),
+                 mac,
++                Arc::new(Semaphore::new(DNS_MAX_IN_FLIGHT)),
+             )?;
+             Ok(port)
+         }) {
+@@ -445,6 +449,7 @@ fn spawn_udp_loop(
+     stop: CancellationToken,
+     counters: DnsCounters,
+     mac: [u8; 6],
++    in_flight: Arc<Semaphore>,
+ ) -> io::Result<()> {
+     let socket = Arc::new(TokioUdpSocket::from_std(socket)?);
+     spawn(async move {
+@@ -460,11 +465,21 @@ fn spawn_udp_loop(
+                         let socket = socket.clone();
+                         let query_stop = stop.child_token();
+                         let counters = counters.clone();
++                        let permit = match in_flight.clone().try_acquire_owned() {
++                            Ok(permit) => permit,
++                            Err(_) => {
++                                if let Some(response) = dns_wire::servfail_response(&query) {
++                                    let _ = socket.send_to(&response, source).await;
++                                }
++                                continue;
++                            }
++                        };
+                         spawn(async move {
+                             select! {
+                                 biased;
+                                 _ = query_stop.cancelled() => {}
+                                 response = resolve_or_error(&snapshot, &query) => {
++                                    drop(permit);
+                                     if let Some(response) = response {
+                                         if let Err(e) = counters.add_exchange(
+                                             mac,
+@@ -505,19 +520,29 @@ async fn resolve_query_accounted(
+     config: &SessionConfig,
+     query: &[u8],
+ ) -> (io::Result<Vec<u8>>, bool) {
+-    if let Some(primary) = config.primary_network {
+-        return query_network(primary, query).await;
++    let Some(primary_or_fallback) = config.primary_network.or(config.fallback_network) else {
++        return (
++            Err(io::Error::new(
++                io::ErrorKind::NotConnected,
++                "no DNS upstream",
++            )),
++            false,
++        );
++    };
++    let (primary_result, primary_sent) = query_network(primary_or_fallback, query).await;
++    if primary_result.is_ok() {
++        return (primary_result, primary_sent);
+     }
+-    if let Some(fallback) = config.fallback_network {
+-        return query_network(fallback, query).await;
++    if let (Some(primary), Some(fallback)) = (config.primary_network, config.fallback_network) {
++        if primary != fallback {
++            let (fallback_result, fallback_sent) = query_network(fallback, query).await;
++            return (
++                fallback_result.or(primary_result),
++                primary_sent || fallback_sent,
++            );
++        }
+     }
+-    (
+-        Err(io::Error::new(
+-            io::ErrorKind::NotConnected,
+-            "no DNS upstream",
+-        )),
+-        false,
+-    )
++    (primary_result, primary_sent)
+ }
+ 
+ async fn resolve_or_error(config: &SessionConfig, query: &[u8]) -> Option<DnsResponse> {
+@@ -564,6 +589,19 @@ pub(crate) async fn resolve_or_error_counted(
+ }
+ 
+ async fn query_network(network: Network, query: &[u8]) -> (io::Result<Vec<u8>>, bool) {
++    match timeout(DNS_QUERY_TIMEOUT, query_network_once(network, query)).await {
++        Ok(result) => result,
++        Err(_) => (
++            Err(io::Error::new(
++                io::ErrorKind::TimedOut,
++                "DNS resolver query timed out",
++            )),
++            true,
++        ),
++    }
++}
++
++async fn query_network_once(network: Network, query: &[u8]) -> (io::Result<Vec<u8>>, bool) {
+     let fd = unsafe {
+         android_res_nsend(
+             network,
