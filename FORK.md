@@ -2,6 +2,8 @@
 
 此 fork 以 [Mygod/VPNHotspot](https://github.com/Mygod/VPNHotspot) 的稳定版为基础，维护少量可重放的补丁。当前补丁针对 v2 遗留的 `vpnhotspot_fwd` 链仍引用 `vpnhotspot_acl`、导致 v3 的 Clean/reapply 删除 ACL 失败的情况。它保留其他防火墙错误的报告，不把所有 `iptables-restore` 失败当作成功。
 
+另有一个 Rust 1.99 Clippy 兼容补丁：ICMP 校验和按两个字节迭代的写法改用 `as_chunks::<2>()`。输入为固定 16 字节数组，校验和计算、路由行为及外部状态均不改变，因此不需要新增 routing.md 状态说明。维护分支的上游 master 已将相关函数拆到 `icmp_quote.rs`，稳定版补丁仍针对 v3.0.8 的 `icmp_wire.rs` 重放。
+
 `iptables-restore: line 10 failed` 本身不足以确认每一台设备的原因。若重启或本补丁的 Clean/reapply 后仍出错，需要应用版本、Android/ROM 版本、触发操作及“导出调试信息”里的 restore 输入。
 
 ## 维护分支与发布源码
