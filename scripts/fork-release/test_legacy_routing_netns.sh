@@ -12,7 +12,8 @@ ip route add table 1042 default dev upstream0
 ip rule add priority 20700 iif downstream0 lookup 1042
 ip rule add priority 20900 iif downstream0 unreachable
 ip rule add priority 17800 iif downstream0 lookup 1031
-ip rule add priority 17800 iif downstream0 lookup 1031
+# Recent kernels reject identical duplicates; still exercise multiple old lookups.
+ip rule add priority 17800 iif downstream0 lookup 1032
 ip rule add priority 17900 iif downstream0 lookup 1016
 ip rule add priority 17980 iif downstream0 unreachable
 # Sentinels must survive even when they reuse legacy priorities.
@@ -27,7 +28,7 @@ fi
 ip route get 1.1.1.1 from 192.0.2.2 iif downstream0 | grep -q 'dev upstream0'
 rules=$(ip rule show)
 ! grep -q '17980:' <<< "$rules"
-! grep -Eq 'lookup (1031|1016)' <<< "$rules"
+! grep -Eq 'lookup (1031|1032|1016)' <<< "$rules"
 grep -q 'lookup 1099' <<< "$rules"
 grep -q 'lookup 1098' <<< "$rules"
 grep -q 'lookup 1097' <<< "$rules"
