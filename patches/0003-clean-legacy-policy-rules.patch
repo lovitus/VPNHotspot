@@ -149,6 +149,7 @@ index 000000000..7c5ce9a35
 +use std::collections::HashSet;
 +
 +use rtnetlink::packet_route::{
++    route::RouteProtocol,
 +    rule::{RuleAction, RuleAttribute, RuleMessage},
 +    AddressFamily,
 +};
@@ -174,6 +175,8 @@ index 000000000..7c5ce9a35
 +            }
 +            RuleAttribute::Priority(value) if priority.is_none() => priority = Some(*value),
 +            RuleAttribute::Table(value) if table.is_none() => table = Some(*value),
++            RuleAttribute::SuppressPrefixLen(value) if *value == u32::MAX => {}
++            RuleAttribute::Protocol(protocol) if matches!(protocol, RouteProtocol::Unspec) => {}
 +            _ => return None,
 +        }
 +    }
