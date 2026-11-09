@@ -13,7 +13,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .execute()
         .try_collect::<Vec<_>>()
         .await?;
+    for rule in &rules {
+        println!("Snapshot: {rule:?}");
+    }
     for rule in legacy_ipv4_rules_to_delete(&rules) {
+        println!("Delete: {rule:?}");
         handle.rule().del(rule).execute().await?;
     }
     task.abort();

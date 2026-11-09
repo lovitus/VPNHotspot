@@ -56,7 +56,7 @@ new file mode 100644
 index 000000000..b7ea5d1d1
 --- /dev/null
 +++ b/mobile/src/main/rust/vpnhotspotd/examples/clean_legacy_rules.rs
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,25 @@
 +//! Isolated-network regression driver using the production rule selector.
 +use futures_util::TryStreamExt;
 +use rtnetlink::IpVersion;
@@ -72,7 +72,11 @@ index 000000000..b7ea5d1d1
 +        .execute()
 +        .try_collect::<Vec<_>>()
 +        .await?;
++    for rule in &rules {
++        println!("Snapshot: {rule:?}");
++    }
 +    for rule in legacy_ipv4_rules_to_delete(&rules) {
++        println!("Delete: {rule:?}");
 +        handle.rule().del(rule).execute().await?;
 +    }
 +    task.abort();
