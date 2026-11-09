@@ -194,6 +194,18 @@ def restore(args):
         raise RuntimeError("Prepared source tree does not match its provenance")
 
 
+def signing_certificate(verification):
+    if not re.search(r"(?m)^Number of signers: 1\r?$", verification):
+        raise RuntimeError("Expected exactly one APK signer")
+    # Build Tools 37 labels certificates by scheme; older versions use Signer #1.
+    certificates = {value.lower() for value in re.findall(
+        r"(?m)^(?:Signer #1|V[0-9]+(?:\.[0-9]+)* Signer:) certificate SHA-256 digest: "
+        r"([0-9a-fA-F]{64})\r?$", verification)}
+    if len(certificates) != 1:
+        raise RuntimeError(f"APK signing certificates differ or could not be verified:\n{verification}")
+    return certificates.pop()
+
+
 def sign(args):
     info = json.loads((args.prepared / "build-info.json").read_text())
     for key in ("APK_SIGNING_KEY", "APK_SIGNING_PASSWORD", "APK_SIGNING_ALIAS"):
@@ -226,10 +238,10 @@ def sign(args):
                 "--ks-key-alias", os.environ["APK_SIGNING_ALIAS"], "--ks-pass", "env:APK_SIGNING_PASSWORD",
                 "--key-pass", "env:APK_SIGNING_PASSWORD", "--out", str(signed), str(aligned))
             verification = run(str(tools / "apksigner"), "verify", "--verbose", "--print-certs", str(signed))
-            matches = re.findall(r"(?m)^Signer #1 certificate SHA-256 digest: ([0-9a-f]+)$", verification)
-            if len(matches) != 1 or (certificate and matches[0] != certificate):
-                raise RuntimeError("APK signing certificates differ or could not be verified")
-            certificate = matches[0]
+            verified_certificate = signing_certificate(verification)
+            if certificate and verified_certificate != certificate:
+                raise RuntimeError("APK signing certificates differ across ABIs")
+            certificate = verified_certificate
             run(str(tools / "zipalign"), "-c", "-P", "16", "4", str(signed))
     info["signing_certificate_sha256"] = certificate
     info["apk_sha256"] = {path.name: digest(path) for path in sorted(args.output.glob("*.apk"))}

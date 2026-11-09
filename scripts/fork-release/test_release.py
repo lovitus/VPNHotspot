@@ -142,5 +142,40 @@ class DraftRecoveryTest(unittest.TestCase):
         self.assertEqual(self.mutations, [])
 
 
+class SigningCertificateTest(unittest.TestCase):
+    certificate = "37990b9e22dd4ee8cf77d78e922af16f7ef329107f15062ecc8e2886e2d3438c"
+
+    def test_build_tools_37_scheme_label(self):
+        output = ("Verifies\nNumber of signers: 1\nV3.0 Signer: certificate DN: CN=test\n"
+                  f"V3.0 Signer: certificate SHA-256 digest: {self.certificate}\n")
+        self.assertEqual(release.signing_certificate(output), self.certificate)
+
+    def test_legacy_label_uppercase_and_windows_newlines(self):
+        output = ("Number of signers: 1\r\n"
+                  f"Signer #1 certificate SHA-256 digest: {self.certificate.upper()}\r\n")
+        self.assertEqual(release.signing_certificate(output), self.certificate)
+
+    def test_multiple_schemes_must_have_same_certificate(self):
+        output = ("Number of signers: 1\n"
+                  f"V3.0 Signer: certificate SHA-256 digest: {self.certificate}\n"
+                  f"V3.1 Signer: certificate SHA-256 digest: {self.certificate}\n")
+        self.assertEqual(release.signing_certificate(output), self.certificate)
+        with self.assertRaises(RuntimeError):
+            release.signing_certificate(output.replace(
+                f"V3.1 Signer: certificate SHA-256 digest: {self.certificate}",
+                f"V3.1 Signer: certificate SHA-256 digest: {'0' * 64}"))
+
+    def test_multiple_signers_are_rejected(self):
+        with self.assertRaises(RuntimeError):
+            release.signing_certificate("Number of signers: 2\n"
+                                        f"Signer #1 certificate SHA-256 digest: {self.certificate}\n")
+
+    def test_missing_or_malformed_certificate_is_rejected(self):
+        for output in ("", "Number of signers: 1\n",
+                       "Number of signers: 1\nV3.0 Signer: certificate SHA-256 digest: abc\n"):
+            with self.subTest(output=output), self.assertRaises(RuntimeError):
+                release.signing_certificate(output)
+
+
 if __name__ == "__main__":
     unittest.main()

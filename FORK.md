@@ -58,7 +58,7 @@ gh workflow enable patched-release.yml --repo OWNER/VPNHotspot
 gh workflow run patched-release.yml --repo OWNER/VPNHotspot
 ```
 
-密码命令同样采用交互输入，不在命令行参数中写密码。后续发布必须继续使用同一把密钥；流程会与 fork 上一份正式 release 的证书摘要比较，发现变化就停止。缺少 secrets 时会明确失败，没有临时 debug key 的替代路径。签名私钥只写入发布 runner 的临时目录并在签名步骤结束时删除，不进入构建 artifacts。
+密码命令同样采用交互输入，不在命令行参数中写密码。后续发布必须继续使用同一把密钥；流程会与 fork 上一份正式 release 的证书摘要比较，发现变化就停止。缺少 secrets 时会明确失败，没有临时 debug key 的替代路径。签名私钥只写入发布 runner 的临时目录并在签名步骤结束时删除，不进入构建 artifacts。验签同时兼容旧版 `Signer #1` 与 Build Tools 37 的 `V3.0 Signer:` 证书输出；要求恰好一个签名者、各签名 scheme 证书一致，并核对四个 ABI 使用同一证书。
 
 默认分支上的 patch、发布脚本、回归脚本、完整 workflow 目录或 `FORK.md` 变更会触发 workflow；也可以手动运行。定时检查为每日 **UTC 03:23 / 台北时间 11:23**。GitHub 可能延迟定时任务；公开仓库 60 天没有活动时还会自动停用 schedule，需要重新启用。此流程不通过空提交强行保活。
 
