@@ -30,7 +30,7 @@ fn legacy_ipv4_rule_interface(rule: &RuleMessage) -> Option<&str> {
             RuleAttribute::Priority(value) if priority.is_none() => priority = Some(*value),
             RuleAttribute::Table(value) if table.is_none() => table = Some(*value),
             RuleAttribute::SuppressPrefixLen(value) if *value == u32::MAX => {}
-            RuleAttribute::Protocol(protocol) if matches!(protocol, rtnetlink::packet_route::rule::RouteProtocol::Unspec) => {}
+            RuleAttribute::Protocol(RouteProtocol::Unspec) => {}
             _ => return None,
         }
     }
