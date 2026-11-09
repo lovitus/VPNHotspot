@@ -62,6 +62,23 @@ def tagged_commit(repo, tag):
     return api(f"{repo}/git/commits/{obj['sha']}")
 
 
+def find_release(repo, tag):
+    # GET /releases/tags/{tag} only returns published releases, even for writers.
+    # The authenticated list includes drafts, which must participate in recovery.
+    found = None
+    page = 1
+    while True:
+        releases = api(f"{repo}/releases?per_page=100&page={page}")
+        for candidate in releases:
+            if candidate["tag_name"] == tag:
+                if found is not None:
+                    raise RuntimeError(f"Multiple releases use {tag}; inspect them before retrying")
+                found = candidate
+        if len(releases) < 100:
+            return found
+        page += 1
+
+
 def same_source(commit, info):
     return (commit["tree"]["sha"] == info["source_tree_sha"]
             and [parent["sha"] for parent in commit["parents"]] == [info["upstream_sha"]])
@@ -157,7 +174,7 @@ def prepare(args):
         "workflow_run": f"https://github.com/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
     }
     existing = tagged_commit(repo, tag)
-    published = api(f"{repo}/releases/tags/{tag}", missing=True)
+    published = find_release(repo, tag)
     if existing and not same_source(existing, info):
         raise RuntimeError(f"{tag} already refers to different source; increment patches/revision")
     if published and not existing:
@@ -258,7 +275,7 @@ def publish(args):
     if run("git", "rev-parse", "HEAD", cwd=args.source) != info["source_sha"]:
         raise RuntimeError("Publication source differs from the verified build")
     existing = tagged_commit(repo, tag)
-    release = api(f"{repo}/releases/tags/{tag}", missing=True)
+    release = find_release(repo, tag)
     if existing and (existing["sha"] != info["source_sha"] or not same_source(existing, info)):
         raise RuntimeError("Release tag changed while validation was running")
     if release and not release["draft"]:
@@ -328,10 +345,14 @@ def publish(args):
     notes_path.write_text(notes)
     assets = sorted(args.output.glob("*.apk")) + [args.output / "build-info.json", args.output / "SHA256SUMS"]
     if not release:
-        run("gh", "release", "create", tag, "--repo", repo, "--verify-tag", "--draft", "--title", tag,
-            "--notes-file", str(notes_path))
+        request_path = args.output / "release-request.json"
+        write_json(request_path, {"tag_name": tag, "target_commitish": info["source_sha"],
+                                  "name": tag, "body": notes, "draft": True})
+        release = json.loads(run("gh", "api", "--method", "POST", f"repos/{repo}/releases",
+                                 "--input", str(request_path)))
+    release_path = f"{repo}/releases/{release['id']}"
     for path in assets:
-        current = api(f"{repo}/releases/tags/{tag}")
+        current = api(release_path)
         if not current["draft"]:
             raise RuntimeError("Release was published concurrently; refusing to change its assets")
         matching = [asset for asset in current["assets"] if asset["name"] == path.name]
@@ -340,7 +361,7 @@ def publish(args):
                 raise RuntimeError(f"Draft asset {path.name} differs; inspect the draft before retrying")
         else:
             run("gh", "release", "upload", tag, "--repo", repo, str(path))
-    uploaded = api(f"{repo}/releases/tags/{tag}")
+    uploaded = api(release_path)
     if not uploaded["draft"]:
         raise RuntimeError("Draft was published concurrently; stop before changing its metadata")
     if {asset["name"] for asset in uploaded["assets"]} != {path.name for path in assets}:

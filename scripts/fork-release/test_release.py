@@ -46,7 +46,9 @@ class DraftRecoveryTest(unittest.TestCase):
             paths = sorted(directory.glob("*.apk")) + [directory / "build-info.json"]
             (directory / "SHA256SUMS").write_text("".join(
                 f"{release.digest(path)}  {path.name}\n" for path in paths))
-        self.draft = {"draft": True, "assets": [self.asset(path) for path in sorted(self.original.iterdir())]}
+        self.draft = {"id": 123, "tag_name": "v3.0.8-p1", "draft": True,
+                      "assets": [self.asset(path) for path in sorted(self.original.iterdir())]}
+        self.exists = True
         self.uploads = []
         self.published = False
         self.mutations = []
@@ -63,7 +65,13 @@ class DraftRecoveryTest(unittest.TestCase):
         return {"name": path.name, "digest": f"sha256:{release.digest(path)}"}
 
     def api(self, path, missing=False):
-        return None if path.endswith("/latest") else copy.deepcopy(self.draft)
+        if path.endswith("/latest"):
+            return None
+        if path == "example/fork/releases?per_page=100&page=1":
+            return [copy.deepcopy(self.draft)] if self.exists else []
+        if path == "example/fork/releases/123":
+            return copy.deepcopy(self.draft)
+        raise AssertionError(f"Unexpected API path (tag lookup cannot read drafts): {path}")
 
     def run_command(self, *args, **kwargs):
         if args[:3] == ("git", "rev-parse", "HEAD"):
@@ -72,6 +80,14 @@ class DraftRecoveryTest(unittest.TestCase):
             target = Path(args[args.index("--dir") + 1]) / "build-info.json"
             target.write_bytes((self.original / "build-info.json").read_bytes())
             return ""
+        if args[:4] == ("gh", "api", "--method", "POST"):
+            request = json.loads(Path(args[args.index("--input") + 1]).read_text())
+            self.assertEqual(request["tag_name"], self.info["release_tag"])
+            self.assertEqual(request["target_commitish"], self.info["source_sha"])
+            self.assertTrue(request["draft"])
+            self.exists = True
+            self.mutations.append(args)
+            return json.dumps(self.draft)
         if args[:3] == ("gh", "release", "upload"):
             path = Path(args[-1])
             self.uploads.append(path.name)
@@ -86,6 +102,13 @@ class DraftRecoveryTest(unittest.TestCase):
 
     def publish(self):
         release.publish(argparse.Namespace(output=self.output, source=self.root / "source"))
+
+    def test_fresh_draft_uses_creation_id_and_publishes_all_assets(self):
+        self.exists = False
+        self.draft["assets"] = []
+        self.publish()
+        self.assertTrue(self.published)
+        self.assertEqual(set(self.uploads), set(self.info["apk_sha256"]) | {"build-info.json", "SHA256SUMS"})
 
     def test_new_run_preserves_original_manifest_and_checksums(self):
         self.publish()
@@ -140,6 +163,28 @@ class DraftRecoveryTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "already published"):
             self.publish()
         self.assertEqual(self.mutations, [])
+
+
+class ReleaseLookupTest(unittest.TestCase):
+    def test_authenticated_list_finds_unpublished_draft(self):
+        draft = {"id": 123, "tag_name": "v3.0.8-p2", "draft": True}
+        with patch.object(release, "api", return_value=[draft]) as api:
+            self.assertEqual(release.find_release("example/fork", "v3.0.8-p2"), draft)
+        api.assert_called_once_with("example/fork/releases?per_page=100&page=1")
+
+    def test_pagination_and_missing_tag(self):
+        first = [{"tag_name": f"other-{index}"} for index in range(100)]
+        draft = {"tag_name": "target", "draft": True}
+        with patch.object(release, "api", side_effect=[first, [draft]]) as api:
+            self.assertEqual(release.find_release("example/fork", "target"), draft)
+            self.assertEqual(api.call_args.args, ("example/fork/releases?per_page=100&page=2",))
+        with patch.object(release, "api", return_value=[]):
+            self.assertIsNone(release.find_release("example/fork", "absent"))
+
+    def test_duplicate_tag_requires_manual_inspection(self):
+        with patch.object(release, "api", return_value=[{"tag_name": "target"}, {"tag_name": "target"}]):
+            with self.assertRaisesRegex(RuntimeError, "Multiple releases"):
+                release.find_release("example/fork", "target")
 
 
 class SigningCertificateTest(unittest.TestCase):

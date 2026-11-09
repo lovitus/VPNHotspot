@@ -20,9 +20,9 @@
 6. 在独立网络命名空间重现上游旧清理逻辑的失败，验证修复后的实际规则；随后执行 Rust 格式、编译、clippy、库测试、依赖审计，以及 Android Debug 构建、检查、R8 检查和 Release 构建。
 7. 只有验证 job 成功，独立发布 job 才读取签名 secrets。它核对包名、版本、四种 ABI 的 daemon、APK 对齐和签名，再发布。
 
-例如首版 tag 为 `v3.0.8-p1`。这个 tag 指向**实际编译的源码 commit**，不是维护分支的 commit；其父 commit 是精确上游版本，新增内容是应用补丁、版本修改和可信维护文件。GitHub release 自带的源代码归档对应 APK 的源码；AOSP 子模块仍需按 `.gitmodules` 和 gitlink 初始化。release 的 `build-info.json` 另外记录上游 SHA、源码 SHA/tree、各补丁 SHA-256、维护文件来源 SHA 与逐文件 SHA-256、workflow run URL、签名证书和 APK 摘要。`SHA256SUMS` 可用于核对下载。
+当前目标 tag 为 `v3.0.8-p2`。首次试运行已创建 `v3.0.8-p1` 源码 tag，但在草稿发布阶段失败，未公开 release；保留该 tag，不移动它，以 revision 2 修复发布流程。这个 tag 指向**实际编译的源码 commit**，不是维护分支的 commit；其父 commit 是精确上游版本，新增内容是应用补丁、版本修改和可信维护文件。GitHub release 自带的源代码归档对应 APK 的源码；AOSP 子模块仍需按 `.gitmodules` 和 gitlink 初始化。release 的 `build-info.json` 另外记录上游 SHA、源码 SHA/tree、各补丁 SHA-256、维护文件来源 SHA 与逐文件 SHA-256、workflow run URL、签名证书和 APK 摘要。`SHA256SUMS` 可用于核对下载。
 
-同一 tag 已发布且源码相同则跳过；同一 tag 已存在但源码不同则失败，需要递增 `patches/revision`。**维护 workflow、发布脚本、回归脚本和 `FORK.md` 也属于发布源码；修改这些文件后要发布新版本，同样需要递增 revision。** 不会强推或移动旧 tag，也不会覆盖已发布 release 的附件。中断留下的 draft 可以用相同产物重试：若已有 `build-info.json`，流程先校验其附件摘要，并核对除运行链接以外的全部构建信息（包括源码、签名证书及 APK 摘要）。仅运行链接不同则保留首次构建的原始元数据，重建对应校验清单；所有已有附件仍须摘要一致，流程不会覆盖它们。新一次构建不保证 APK 字节完全相同，若 APK 或其他构建信息变化，仍需人工检查并处理草稿；不能把不同产物混入同一版本。
+同一 tag 已发布且源码相同则跳过；同一 tag 已存在但源码不同则失败，需要递增 `patches/revision`。**维护 workflow、发布脚本、回归脚本和 `FORK.md` 也属于发布源码；修改这些文件后要发布新版本，同样需要递增 revision。** 不会强推或移动旧 tag，也不会覆盖已发布 release 的附件。GitHub 的按 tag 查询接口只返回正式 release；流程改用已认证的 release 列表定位草稿，创建时直接取得 release ID，后续按 ID 检查附件及草稿状态。中断留下的 draft 可以用相同产物重试：若已有 `build-info.json`，流程先校验其附件摘要，并核对除运行链接以外的全部构建信息（包括源码、签名证书及 APK 摘要）。仅运行链接不同则保留首次构建的原始元数据，重建对应校验清单；所有已有附件仍须摘要一致，流程不会覆盖它们。新一次构建不保证 APK 字节完全相同，若 APK 或其他构建信息变化，仍需人工检查并处理草稿；不能把不同产物混入同一版本。
 
 上游每次发布新稳定版会自动重放当前补丁。上游修复本问题、修改清理路径或改变构建声明时，补丁/检查可能不再适用；这时应审查失败日志并更新或删除相应 patch，不能绕过验证。
 
