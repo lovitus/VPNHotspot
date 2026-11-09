@@ -1,0 +1,313 @@
+diff --git a/README.md b/README.md
+index 8b2058090..2ca7447c4 100644
+--- a/README.md
++++ b/README.md
+@@ -70,6 +70,16 @@ persists, use **Settings > Export debug information** and include the app versio
+ Android version, and the action that triggered it; the report includes the
+ restore input needed to identify the failing rule.
+ 
++### Connected clients have no internet after upgrading from v2?
++
++Legacy IPv4 policy rules can point to obsolete upstream tables and reject
++forwarded traffic before v3's current rules. This build's **Settings >
++Clean/reapply routing rules** also removes recognizable pre-v3 rule groups
++(17800/17900 lookups paired with a 17980 unreachable guard on the same
++interface). It preserves unrelated selectors and does not flush upstream tables.
++Normal session stop does not recover old state. Rebooting also clears it.
++This addresses upgrade residue, not every possible DNS, VPN or ROM issue.
++
+ ### [No root?](https://github.com/Mygod/VPNHotspot/issues/62)
+ 
+ ### Failed to create group due to internal error/repeater shuts down after a while?
+diff --git a/docs/vpnhotspotd/routing.md b/docs/vpnhotspotd/routing.md
+index cd08be3e8..129a4c93e 100644
+--- a/docs/vpnhotspotd/routing.md
++++ b/docs/vpnhotspotd/routing.md
+@@ -664,8 +664,27 @@ External mutations:
+ - repeatedly delete IPv4 policy rules at `<primary-priority>`.
+ - repeatedly delete IPv4 policy rules at `<fallback-priority>`.
+ - repeatedly delete IPv4 policy rules at `<upstream-disable-priority>`.
++- recover pre-v3 IPv4 rule groups: dump IPv4 rules, identify an unmarked,
++  all-address `iif <downstream> priority 17980 unreachable` guard, then delete
++  exact snapshot rules for that interface with priorities 17800/17900 and
++  `lookup <table >= 1000>`, followed by its exact legacy guard. Require zero
++  source/destination prefix lengths, TOS and flags, no extra selectors, and a
++  nonempty interface other than loopback. Preserve unmatched rules, marked or
++  selective rules, and same-priority lookups without a matching legacy guard.
++  Duplicate and detached-interface rules are included; no upstream routes or
++  tables are flushed. Delete lookup rules before guards, ignore only expected
++  missing-rule errors, and propagate other failures with structured context.
+ - flush IPv6 routes from table 900.
+ 
++Legacy recovery runs only during Clean/reapply, not normal session startup or
++stop. The pre-v3 guard can otherwise reject traffic before the current API 31+
++20700/20800 lookups, especially when its old interface-index tables are empty.
++Clean does not restore obsolete rules; reapply rebuilds current session rules.
++A process death or upgrade may leave old state; repeated Clean is idempotent,
++and a reboot clears temporary policy rules. Rule shape is a conservative
++ownership heuristic: another tool deliberately using the exact old group is
++indistinguishable, so do not run a second legacy routing owner concurrently.
++
+ For every current interface name:
+ 
+ - reconstruct the deterministic NAT66 prefix from the Clean prefix seed and the
+diff --git a/mobile/src/main/rust/vpnhotspotd/examples/clean_legacy_rules.rs b/mobile/src/main/rust/vpnhotspotd/examples/clean_legacy_rules.rs
+new file mode 100644
+index 000000000..b7ea5d1d1
+--- /dev/null
++++ b/mobile/src/main/rust/vpnhotspotd/examples/clean_legacy_rules.rs
+@@ -0,0 +1,21 @@
++//! Isolated-network regression driver using the production rule selector.
++use futures_util::TryStreamExt;
++use rtnetlink::IpVersion;
++use vpnhotspotd::shared::legacy_routing::legacy_ipv4_rules_to_delete;
++
++#[tokio::main]
++async fn main() -> Result<(), Box<dyn std::error::Error>> {
++    let (connection, handle, _) = rtnetlink::new_connection()?;
++    let task = tokio::spawn(connection);
++    let rules = handle
++        .rule()
++        .get(IpVersion::V4)
++        .execute()
++        .try_collect::<Vec<_>>()
++        .await?;
++    for rule in legacy_ipv4_rules_to_delete(&rules) {
++        handle.rule().del(rule).execute().await?;
++    }
++    task.abort();
++    Ok(())
++}
+diff --git a/mobile/src/main/rust/vpnhotspotd/src/routing.rs b/mobile/src/main/rust/vpnhotspotd/src/routing.rs
+index e6019c847..ad62ea271 100644
+--- a/mobile/src/main/rust/vpnhotspotd/src/routing.rs
++++ b/mobile/src/main/rust/vpnhotspotd/src/routing.rs
+@@ -12,6 +12,7 @@ mod iptables;
+ mod ipv6_nat_firewall;
+ mod ipv6_nat_intercept;
+ mod ipv6_nat_listener_rules;
++mod legacy_cleanup;
+ mod ndc;
+ mod netlink_commands;
+ mod static_addresses;
+@@ -280,6 +281,7 @@ pub(crate) async fn clean(
+         rule_priority(RULE_PRIORITY_UPSTREAM_DISABLE_SYSTEM_BASE),
+     )
+     .await?;
++    legacy_cleanup::clean(connection).await?;
+     clean_ip(connection, command).await?;
+     firewall_cleanup::clean().await;
+     Ok(())
+diff --git a/mobile/src/main/rust/vpnhotspotd/src/routing/legacy_cleanup.rs b/mobile/src/main/rust/vpnhotspotd/src/routing/legacy_cleanup.rs
+new file mode 100644
+index 000000000..c3467ffb4
+--- /dev/null
++++ b/mobile/src/main/rust/vpnhotspotd/src/routing/legacy_cleanup.rs
+@@ -0,0 +1,30 @@
++use std::io;
++
++use rtnetlink::IpVersion;
++use vpnhotspotd::shared::legacy_routing::legacy_ipv4_rules_to_delete;
++use vpnhotspotd::shared::protocol::IoResultReportExt;
++
++use crate::netlink;
++
++use super::netlink_commands::is_missing;
++
++pub(super) async fn clean(connection: &mut netlink::RequestConnection) -> io::Result<()> {
++    let rules = connection
++        .dump_rules(IpVersion::V4)
++        .await
++        .with_report_context("routing.clean_legacy_rules.dump")?;
++    // Preserve every selector in the kernel snapshot, including detached interfaces.
++    for rule in legacy_ipv4_rules_to_delete(&rules) {
++        match connection.delete_rule(rule.clone()).await {
++            Ok(()) => {}
++            Err(error) if is_missing(&error) => {}
++            Err(error) => {
++                return Err(error).with_report_context_details(
++                    "routing.clean_legacy_rules.delete",
++                    [("rule", format!("{rule:?}"))],
++                );
++            }
++        }
++    }
++    Ok(())
++}
+diff --git a/mobile/src/main/rust/vpnhotspotd/src/shared/legacy_routing.rs b/mobile/src/main/rust/vpnhotspotd/src/shared/legacy_routing.rs
+new file mode 100644
+index 000000000..7c5ce9a35
+--- /dev/null
++++ b/mobile/src/main/rust/vpnhotspotd/src/shared/legacy_routing.rs
+@@ -0,0 +1,161 @@
++//! Identify the pre-v3 IPv4 policy-rule group without deleting by priority alone.
++
++use std::collections::HashSet;
++
++use rtnetlink::packet_route::{
++    rule::{RuleAction, RuleAttribute, RuleMessage},
++    AddressFamily,
++};
++
++/// Returns the downstream only for the exact unmarked, all-address legacy shape.
++/// Lookup rules must additionally be paired with a legacy guard on that interface.
++fn legacy_ipv4_rule_interface(rule: &RuleMessage) -> Option<&str> {
++    if rule.header.family != AddressFamily::Inet
++        || rule.header.src_len != 0
++        || rule.header.dst_len != 0
++        || rule.header.tos != 0
++        || !rule.header.flags.is_empty()
++    {
++        return None;
++    }
++    let mut interface = None;
++    let mut priority = None;
++    let mut table = None;
++    for attribute in &rule.attributes {
++        match attribute {
++            RuleAttribute::Iifname(value) if interface.is_none() => {
++                interface = Some(value.as_str())
++            }
++            RuleAttribute::Priority(value) if priority.is_none() => priority = Some(*value),
++            RuleAttribute::Table(value) if table.is_none() => table = Some(*value),
++            _ => return None,
++        }
++    }
++    let interface = interface.filter(|name| !name.is_empty() && *name != "lo")?;
++    let table = table.unwrap_or(u32::from(rule.header.table));
++    match (priority?, rule.header.action) {
++        (17800 | 17900, RuleAction::ToTable) if table >= 1000 => Some(interface),
++        (17980, RuleAction::Unreachable) if table == 0 => Some(interface),
++        _ => None,
++    }
++}
++
++/// Snapshot the exact rules owned by a recognizable old downstream group.
++/// Guards are returned last so failure cannot silently enable system fallback.
++pub fn legacy_ipv4_rules_to_delete(rules: &[RuleMessage]) -> Vec<RuleMessage> {
++    let downstreams = rules
++        .iter()
++        .filter(|rule| rule.header.action == RuleAction::Unreachable)
++        .filter_map(legacy_ipv4_rule_interface)
++        .collect::<HashSet<_>>();
++    [false, true]
++        .into_iter()
++        .flat_map(|guard| {
++            rules
++                .iter()
++                .filter(move |rule| (rule.header.action == RuleAction::Unreachable) == guard)
++        })
++        .filter(|rule| {
++            legacy_ipv4_rule_interface(rule).is_some_and(|name| downstreams.contains(name))
++        })
++        .cloned()
++        .collect()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn rule(priority: u32, table: u32, action: RuleAction) -> RuleMessage {
++        let mut rule = RuleMessage::default();
++        rule.header.family = AddressFamily::Inet;
++        rule.header.action = action;
++        rule.attributes = vec![
++            RuleAttribute::Priority(priority),
++            RuleAttribute::Iifname("p2p0".to_owned()),
++            RuleAttribute::Table(table),
++        ];
++        rule
++    }
++
++    #[test]
++    fn recognizes_observed_legacy_group() {
++        for rule in [
++            rule(17800, 1031, RuleAction::ToTable),
++            rule(17900, 1016, RuleAction::ToTable),
++            rule(17980, 0, RuleAction::Unreachable),
++        ] {
++            assert_eq!(legacy_ipv4_rule_interface(&rule), Some("p2p0"));
++        }
++    }
++
++    #[test]
++    fn preserves_current_rules_and_system_tables() {
++        for rule in [
++            rule(20700, 1042, RuleAction::ToTable),
++            rule(20800, 1024, RuleAction::ToTable),
++            rule(20900, 0, RuleAction::Unreachable),
++            rule(17800, 97, RuleAction::ToTable),
++            rule(17900, 99, RuleAction::ToTable),
++            rule(17980, 1042, RuleAction::ToTable),
++        ] {
++            assert_eq!(legacy_ipv4_rule_interface(&rule), None);
++        }
++    }
++
++    #[test]
++    fn preserves_selective_or_marked_custom_rules() {
++        for attribute in [
++            RuleAttribute::FwMark(1),
++            RuleAttribute::FwMask(1),
++            RuleAttribute::Oifname("tun0".to_owned()),
++            RuleAttribute::Priority(17800),
++        ] {
++            let mut message = rule(17800, 1031, RuleAction::ToTable);
++            message.attributes.push(attribute);
++            assert_eq!(legacy_ipv4_rule_interface(&message), None);
++        }
++        for field in 0..4 {
++            let mut message = rule(17800, 1031, RuleAction::ToTable);
++            match field {
++                0 => message.header.src_len = 24,
++                1 => message.header.dst_len = 24,
++                2 => message.header.tos = 1,
++                _ => message.header.family = AddressFamily::Inet6,
++            }
++            assert_eq!(legacy_ipv4_rule_interface(&message), None);
++        }
++    }
++
++    #[test]
++    fn requires_matching_guard_and_preserves_duplicate_order() {
++        let lookup = rule(17800, 1031, RuleAction::ToTable);
++        let guard = rule(17980, 0, RuleAction::Unreachable);
++        assert!(legacy_ipv4_rules_to_delete(std::slice::from_ref(&lookup)).is_empty());
++        let mut other = lookup.clone();
++        other
++            .attributes
++            .retain(|value| !matches!(value, RuleAttribute::Iifname(_)));
++        other
++            .attributes
++            .push(RuleAttribute::Iifname("wlan1".to_owned()));
++        let rules = vec![guard.clone(), lookup.clone(), other, lookup.clone()];
++        assert_eq!(
++            legacy_ipv4_rules_to_delete(&rules),
++            vec![lookup.clone(), lookup, guard]
++        );
++    }
++
++    #[test]
++    fn requires_downstream_interface() {
++        let mut message = rule(17980, 0, RuleAction::Unreachable);
++        message
++            .attributes
++            .retain(|value| !matches!(value, RuleAttribute::Iifname(_)));
++        assert_eq!(legacy_ipv4_rule_interface(&message), None);
++        message
++            .attributes
++            .push(RuleAttribute::Iifname("lo".to_owned()));
++        assert_eq!(legacy_ipv4_rule_interface(&message), None);
++    }
++}
+diff --git a/mobile/src/main/rust/vpnhotspotd/src/shared/mod.rs b/mobile/src/main/rust/vpnhotspotd/src/shared/mod.rs
+index 4c9297217..bc8866524 100644
+--- a/mobile/src/main/rust/vpnhotspotd/src/shared/mod.rs
++++ b/mobile/src/main/rust/vpnhotspotd/src/shared/mod.rs
+@@ -6,4 +6,5 @@
+ pub mod ipsec;
++pub mod legacy_routing;
+ pub mod ipv4_forward_counter;
+ pub mod model;
+ pub mod nat66_counter;

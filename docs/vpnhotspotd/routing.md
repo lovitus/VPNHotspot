@@ -664,7 +664,26 @@ External mutations:
 - repeatedly delete IPv4 policy rules at `<primary-priority>`.
 - repeatedly delete IPv4 policy rules at `<fallback-priority>`.
 - repeatedly delete IPv4 policy rules at `<upstream-disable-priority>`.
+- recover pre-v3 IPv4 rule groups: dump IPv4 rules, identify an unmarked,
+  all-address `iif <downstream> priority 17980 unreachable` guard, then delete
+  exact snapshot rules for that interface with priorities 17800/17900 and
+  `lookup <table >= 1000>`, followed by its exact legacy guard. Require zero
+  source/destination prefix lengths, TOS and flags, no extra selectors, and a
+  nonempty interface other than loopback. Preserve unmatched rules, marked or
+  selective rules, and same-priority lookups without a matching legacy guard.
+  Duplicate and detached-interface rules are included; no upstream routes or
+  tables are flushed. Delete lookup rules before guards, ignore only expected
+  missing-rule errors, and propagate other failures with structured context.
 - flush IPv6 routes from table 900.
+
+Legacy recovery runs only during Clean/reapply, not normal session startup or
+stop. The pre-v3 guard can otherwise reject traffic before the current API 31+
+20700/20800 lookups, especially when its old interface-index tables are empty.
+Clean does not restore obsolete rules; reapply rebuilds current session rules.
+A process death or upgrade may leave old state; repeated Clean is idempotent,
+and a reboot clears temporary policy rules. Rule shape is a conservative
+ownership heuristic: another tool deliberately using the exact old group is
+indistinguishable, so do not run a second legacy routing owner concurrently.
 
 For every current interface name:
 

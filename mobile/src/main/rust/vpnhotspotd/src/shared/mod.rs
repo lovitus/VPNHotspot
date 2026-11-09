@@ -5,6 +5,7 @@ pub mod icmp_nat;
 pub mod icmp_quote;
 pub mod icmp_wire;
 pub mod ipsec;
+pub mod legacy_routing;
 pub mod ipv4_forward_counter;
 pub mod model;
 pub mod nat66_counter;

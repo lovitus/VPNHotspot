@@ -70,6 +70,16 @@ persists, use **Settings > Export debug information** and include the app versio
 Android version, and the action that triggered it; the report includes the
 restore input needed to identify the failing rule.
 
+### Connected clients have no internet after upgrading from v2?
+
+Legacy IPv4 policy rules can point to obsolete upstream tables and reject
+forwarded traffic before v3's current rules. This build's **Settings >
+Clean/reapply routing rules** also removes recognizable pre-v3 rule groups
+(17800/17900 lookups paired with a 17980 unreachable guard on the same
+interface). It preserves unrelated selectors and does not flush upstream tables.
+Normal session stop does not recover old state. Rebooting also clears it.
+This addresses upgrade residue, not every possible DNS, VPN or ROM issue.
+
 ### [No root?](https://github.com/Mygod/VPNHotspot/issues/62)
 
 ### Failed to create group due to internal error/repeater shuts down after a while?

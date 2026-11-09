@@ -12,6 +12,7 @@ mod iptables;
 mod ipv6_nat_firewall;
 mod ipv6_nat_intercept;
 mod ipv6_nat_listener_rules;
+mod legacy_cleanup;
 mod ndc;
 mod netlink_commands;
 mod static_addresses;
@@ -280,6 +281,7 @@ pub(crate) async fn clean(
         rule_priority(RULE_PRIORITY_UPSTREAM_DISABLE_SYSTEM_BASE),
     )
     .await?;
+    legacy_cleanup::clean(connection).await?;
     clean_ip(connection, command).await?;
     firewall_cleanup::clean().await;
     Ok(())

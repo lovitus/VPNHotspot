@@ -104,6 +104,10 @@ jobs:
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked --lib
           cargo audit
+      - name: Verify legacy policy-rule recovery in an isolated namespace
+        run: |
+          cargo build --locked --manifest-path source/mobile/src/main/rust/vpnhotspotd/Cargo.toml --example clean_legacy_rules
+          sudo unshare --net -- bash maintenance/scripts/fork-release/test_legacy_routing_netns.sh source/mobile/src/main/rust/vpnhotspotd/target/debug/examples/clean_legacy_rules
       - name: Build and check Android app
         working-directory: source
         run: |
